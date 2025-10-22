@@ -34,6 +34,16 @@ A simple guide to understanding how AI generates text
 
 ---
 
+## Embedding Vectors
+
+**Its all about the vectors**
+
+ - The rest of the process is about refining these vectors so that they encode the various relationship between tokens
+ - The math is a bunch of linear algebra and matrix operations
+ - In the end, these vectors are used to predict the next word
+  
+---
+
 ## Positional Encoding: Remembering Word Order
 
 **Position matters**
