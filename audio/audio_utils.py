@@ -58,6 +58,7 @@ def speak(voice, text, filename):
         SystemExit: If all 3 retry attempts fail
     """
     # Retry up to 3 times in case of transient errors
+    text = f'"{text}", wait 2 seconds after speaking'
     for i in range(3):
         try:
             # Initialize Google Gemini client with API key from environment
@@ -74,7 +75,7 @@ def speak(voice, text, filename):
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(
                                 voice_name=voice,
                             )
-                        )
+                        ),
                     ),
                 ),
             )
