@@ -2,10 +2,11 @@
 """
 Convert slide notes from markdown to MP3 audio files.
 
-This script reads llm-simple-notes.md and converts each slide section
+This script reads a markdown notes file and converts each slide section
 to a separate MP3 file using Google Gemini TTS.
 """
 
+import argparse
 import os
 import sys
 from audio_utils import speak
@@ -24,7 +25,7 @@ def parse_notes_sections(notes_file):
     with open(notes_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # Split by slide separator
+    # Split by slide separator (triple hyphens)
     sections = content.split('---')
 
     # Remove empty sections
@@ -39,8 +40,11 @@ def parse_notes_sections(notes_file):
         text_lines = []
 
         for line in lines:
+            # Skip triple hyphens (in case they appear within sections)
+            if line.strip() == '---':
+                continue
             # Skip the main title (first section header)
-            if line.startswith('# How Language AI Works'):
+            elif line.startswith('# How Language AI Works'):
                 continue
             # Skip individual slide titles (## Slide N:)
             elif line.startswith('## Slide'):
@@ -96,17 +100,34 @@ def convert_notes_to_audio(notes_file, voice="Sadaltager", output_dir="."):
 
 def main():
     """Main entry point for the script."""
-    # Default notes file path
-    notes_file = "llm-simple-notes.md"
+    # Set up argument parser
+    parser = argparse.ArgumentParser(
+        description="Convert slide notes from markdown to MP3 audio files."
+    )
+    parser.add_argument(
+        "notes_file",
+        help="Path to the markdown notes file to convert"
+    )
+    parser.add_argument(
+        "-v", "--voice",
+        default="Sadaltager",
+        help="Voice name to use for TTS (default: Sadaltager)"
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        default=".",
+        help="Directory to save the output MP3 files (default: current directory)"
+    )
+
+    args = parser.parse_args()
 
     # Check if file exists
-    if not os.path.exists(notes_file):
-        print(f"Error: File '{notes_file}' not found", file=sys.stderr)
-        print("Make sure llm-simple-notes.md is in the current directory.", file=sys.stderr)
+    if not os.path.exists(args.notes_file):
+        print(f"Error: File '{args.notes_file}' not found", file=sys.stderr)
         sys.exit(1)
 
     # Convert notes to audio files
-    convert_notes_to_audio(notes_file, voice="Sadaltager", output_dir=".")
+    convert_notes_to_audio(args.notes_file, voice=args.voice, output_dir=args.output_dir)
 
 
 if __name__ == "__main__":
