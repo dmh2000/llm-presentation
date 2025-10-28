@@ -16,6 +16,35 @@ def get_next_spid(slide_tree):
     spids = [int(sp.attrib['id']) for sp in slide_tree.findall('.//{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr')]
     return str(max(spids) + 1 if spids else 1)
 
+def update_content_types(temp_dir, extensions_needed):
+    """Updates [Content_Types].xml to include required media extensions."""
+    content_types_path = os.path.join(temp_dir, '[Content_Types].xml')
+
+    # Parse the content types file
+    ET.register_namespace('', 'http://schemas.openxmlformats.org/package/2006/content-types')
+    tree = ET.parse(content_types_path)
+    root = tree.getroot()
+
+    # Map extensions to their content types
+    content_type_map = {
+        'mp3': 'audio/mpeg',
+        'png': 'image/png',
+        'jpeg': 'image/jpeg',
+        'jpg': 'image/jpeg'
+    }
+
+    # Get existing extensions
+    existing_extensions = {elem.attrib['Extension'] for elem in root.findall('{http://schemas.openxmlformats.org/package/2006/content-types}Default')}
+
+    # Add missing content types
+    for ext in extensions_needed:
+        if ext not in existing_extensions and ext in content_type_map:
+            ET.SubElement(root, '{http://schemas.openxmlformats.org/package/2006/content-types}Default',
+                         Extension=ext, ContentType=content_type_map[ext])
+
+    # Write back with proper formatting
+    tree.write(content_types_path, xml_declaration=True, encoding='UTF-8', method='xml')
+
 def embed_audio(slide_number, pptx_path, mp3_path, icon_path='audio_icon.png'):
     """Embeds an MP3 file into a specific slide of a PowerPoint presentation."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -35,19 +64,22 @@ def embed_audio(slide_number, pptx_path, mp3_path, icon_path='audio_icon.png'):
 
         # Update slide relationships
         rels_path = os.path.join(temp_dir, 'ppt', 'slides', '_rels', f'slide{slide_number}.xml.rels')
+
+        # Register namespace to avoid auto-generated prefixes
+        ET.register_namespace('', 'http://schemas.openxmlformats.org/package/2006/relationships')
         rels_tree = ET.parse(rels_path)
         rels_root = rels_tree.getroot()
-        
+
         rid_media = get_next_rid(rels_tree)
         ET.SubElement(rels_root, 'Relationship', Id=rid_media, Type='http://schemas.microsoft.com/office/2007/relationships/media', Target=f'../media/{mp3_filename}')
-        
+
         rid_audio = get_next_rid(rels_tree)
         ET.SubElement(rels_root, 'Relationship', Id=rid_audio, Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio', Target=f'../media/{mp3_filename}')
-        
+
         rid_image = get_next_rid(rels_tree)
         ET.SubElement(rels_root, 'Relationship', Id=rid_image, Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image', Target=f'../media/{icon_filename}')
-        
-        rels_tree.write(rels_path, xml_declaration=True, encoding="UTF-8")
+
+        rels_tree.write(rels_path, xml_declaration=True, encoding="UTF-8", method='xml')
 
         # Update slide content
         slide_path = os.path.join(temp_dir, 'ppt', 'slides', f'slide{slide_number}.xml')
@@ -165,7 +197,12 @@ def embed_audio(slide_number, pptx_path, mp3_path, icon_path='audio_icon.png'):
             slide_root.insert(list(slide_root).index(clr_map_ovr) + 1, timing_element)
         else:
             slide_root.append(timing_element)
-        slide_tree.write(slide_path, xml_declaration=True, encoding="UTF-8")
+        slide_tree.write(slide_path, xml_declaration=True, encoding="UTF-8", method='xml')
+
+        # Update [Content_Types].xml to register media file extensions
+        mp3_ext = os.path.splitext(mp3_path)[1][1:]  # Get extension without dot
+        icon_ext = os.path.splitext(icon_path)[1][1:]  # Get extension without dot
+        update_content_types(temp_dir, [mp3_ext, icon_ext])
 
         # Re-zip the presentation
         shutil.make_archive(pptx_path.replace('.pptx', ''), 'zip', temp_dir)

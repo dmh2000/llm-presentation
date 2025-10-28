@@ -21,3 +21,6 @@ the directory t2/ppt contains an idential powerpoint presentation with media add
 file 12.txt is a diff of the two directories
 first create a plan for creating the python script. let me know if you need any more information
 do not create any code at this point
+
+
+@test/cmd  python program embed_audio.py is almost working but it has an error in it. when it  modifies a powerpoint by adding an mp3, the powerpoint program says it needs to repair the file. after it repairs the file, it works. can you analyze test/cmd/embed_audio.py to see if you see an error. the file a1.pptx is a file that works correctly in powerpoint. you can use context7 for the microsoft open format of powerpoint xml.
