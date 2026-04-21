@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How LLMs Perform Inference</title>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="deck-stage.js"></script>
+
+  <template id="__bundler_thumbnail" data-bg-color="#0c0f14">
+    <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1200" height="800" fill="#0c0f14"/>
+      <!-- Title text suggestion -->
+      <rect x="80" y="120" width="600" height="18" rx="4" fill="#4f9cf9" opacity="0.9"/>
+      <rect x="80" y="154" width="440" height="12" rx="3" fill="#e8eaf2" opacity="0.4"/>
+      <!-- Pipeline boxes row 1 -->
+      <rect x="80"  y="280" width="140" height="90" rx="8" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+      <rect x="250" y="280" width="140" height="90" rx="8" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+      <rect x="420" y="260" width="340" height="110" rx="8" fill="#1e2535" stroke="#2dd4c0" stroke-width="2"/>
+      <!-- Arrows row 1 -->
+      <line x1="220" y1="325" x2="248" y2="325" stroke="#717899" stroke-width="2"/>
+      <line x1="390" y1="325" x2="418" y2="325" stroke="#717899" stroke-width="2"/>
+      <!-- Down connector -->
+      <line x1="680" y1="370" x2="680" y2="440" stroke="#717899" stroke-width="2" stroke-dasharray="6,3"/>
+      <!-- Pipeline boxes row 2 -->
+      <rect x="540" y="440" width="140" height="90" rx="8" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+      <rect x="370" y="440" width="140" height="90" rx="8" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+      <rect x="200" y="440" width="140" height="90" rx="8" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+      <!-- Arrows row 2 -->
+      <line x1="540" y1="485" x2="512" y2="485" stroke="#a78bfa" stroke-width="2"/>
+      <line x1="370" y1="485" x2="342" y2="485" stroke="#2dd4c0" stroke-width="2"/>
+    </svg>
+  </template>
+
+  <script type="application/json" id="speaker-notes">
+  [
+    "Welcome everyone. Today we're going to open the black box — walk through exactly what happens inside a large language model from the moment you send a prompt to the moment tokens start streaming back. We'll go step by step, and I'll try to give you a strong mental model for each stage of the pipeline.",
+    "Modern LLMs like GPT and Llama are decode-only transformers — they generate text one token at a time, left to right, like finishing someone's sentence. Think of it like a very sophisticated autocomplete engine — one that's read a significant fraction of the internet. The key insight is that the model has just one job: predict the next token given everything that came before. And it does this in a loop.",
+    "Before the model can do anything, raw text must be converted into tokens — small chunks that are usually words, subwords, or punctuation. The model works with a fixed vocabulary of around 32K to 100K token IDs. Common words like 'the' are a single token; rare words get split into pieces — 'unbelievable' becomes 'un', 'believ', 'able'. This is a pre-built dictionary, not something the model learned. Think of it as translating human language into the model's native language of integers.",
+    "Each token ID is looked up in an embedding table, producing a dense vector — typically 4096 numbers — that represents the token's meaning. These vectors live in a high-dimensional space where similar concepts cluster together. But the model also needs to know where each token sits in the sequence — 'dog bites man' vs 'man bites dog' mean very different things. So positional encodings are added to each embedding to encode order. The result is a rich numerical representation of both what the token is and where it sits.",
+    "Self-attention is the core mechanism that lets each token look at every previous token and decide which ones are relevant. Think of reading a sentence and highlighting the words that help you understand the current word — that's what attention does, mathematically. Each token produces three vectors: a Query — what am I looking for? A Key — what do I contain? And a Value — what information do I share? Attention scores come from comparing each Query against all previous Keys. Multi-head attention runs this process in parallel, letting the model attend to grammar, meaning, and context simultaneously.",
+    "After attention gathers context, each token passes through a feed-forward network — two large matrix multiplications with an activation function in between. If attention is about relationships between words, the FFN is about applying stored knowledge. These layers are where most of the model's parameters live — they act like a vast compressed database of learned information. Each transformer block pairs one attention layer with one FFN. A typical model stacks 32 to 80 of these blocks.",
+    "The model processes tokens through dozens of transformer blocks in sequence — each one refining the representation further. Early layers capture surface-level features: syntax, grammar. Middle layers build more abstract understanding: entities, semantic roles, factual associations. Later layers focus on task-specific reasoning — deciding what the actual next word should be. Residual connections mean information can skip ahead, and layer normalization keeps everything numerically stable across depth.",
+    "After the final transformer block, we only care about the last token's vector — that's the one predicting what comes next. This vector is multiplied by the embedding table to produce a score, called a logit, for every token in the vocabulary. A softmax function converts these into probabilities. A sampling strategy then picks the actual next token: greedy takes the highest, temperature sampling adds randomness, top-k and top-p choose from the most likely candidates. The chosen token is appended to the sequence, and the whole process repeats.",
+    "Naively, generating each new token would require reprocessing the entire sequence from scratch — this gets very expensive as the output grows. The KV cache solves this by storing the Key and Value vectors from all previous tokens, so they don't need to be recomputed. When generating token 100, only the new token needs to go through the full computation. This is a classic time-space tradeoff: more memory in exchange for dramatically less computation. The KV cache is a major reason LLM inference is memory-bound rather than compute-bound.",
+    "Inference has two distinct phases. In the prefill phase, the model processes your entire input prompt in one parallel batch — compute-heavy but fast because all tokens are handled simultaneously. In the decode phase, the model generates output tokens one at a time in a sequential loop. Prefill is like reading a whole page at once; decode is like writing one word at a time. Time-to-first-token is dominated by prefill; tokens-per-second after that is determined by decode speed. Understanding this split is key to optimizing inference.",
+    "The full pipeline: tokenize, embed, pass through N transformer blocks — attention plus FFN each — project to vocabulary, sample, repeat. A single forward pass through a large model involves billions of multiply-add operations, yet produces just one token. A typical response of 200 tokens means 200 sequential forward passes through the entire model. The magic isn't in any single component — it's in scale: enough parameters, enough training data, enough layers to capture the patterns of language. Current research focuses on making this faster through speculative decoding, quantization, and better architectures."
+  ]
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:     #0c0f14;
+      --bg2:    #111520;
+      --card:   #161b26;
+      --border: rgba(255,255,255,0.07);
+      --text:   #e8eaf2;
+      --muted:  #717899;
+      --blue:   #4f9cf9;
+      --teal:   #2dd4c0;
+      --purple: #a78bfa;
+      --amber:  #f5a623;
+      --font:   'Space Grotesk', sans-serif;
+      --mono:   'JetBrains Mono', monospace;
+    }
+
+    section {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      display: flex;
+      flex-direction: column;
+      padding: 72px 100px 72px;
+    }
+
+    .label {
+      font-family: var(--mono);
+      font-size: 24px;
+      color: var(--blue);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      opacity: 0.9;
+    }
+    .label::after {
+      content: '';
+      width: 48px; height: 1px;
+      background: var(--blue); opacity: 0.35;
+    }
+
+    .slide-title {
+      font-size: 66px;
+      font-weight: 700;
+      line-height: 1.06;
+      letter-spacing: -0.025em;
+      color: var(--text);
+      margin-bottom: 44px;
+      text-wrap: balance;
+    }
+
+    .split {
+      display: flex;
+      flex: 1;
+      gap: 72px;
+      align-items: stretch;
+      min-height: 0;
+    }
+
+    .diagram-pane {
+      flex: 1.5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--card);
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      padding: 20px 24px;
+    }
+
+    .bullets-pane {
+      flex: 0.5;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 30px;
+    }
+
+    .bullet {
+      font-size: 28px;
+      line-height: 1.5;
+      color: var(--text);
+      padding-left: 28px;
+      position: relative;
+    }
+    .bullet::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 14px;
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+    .bullet.t::before { background: var(--teal); }
+    .bullet.p::before { background: var(--purple); }
+    .bullet.a::before { background: var(--amber); }
+
+    .bullet em           { font-style:normal; color:var(--blue); font-weight:600; }
+    .bullet em.t         { color:var(--teal); }
+    .bullet em.p         { color:var(--purple); }
+    .bullet em.a         { color:var(--amber); }
+  </style>
+</head>
+<body>
+<deck-stage width="1920" height="1080">
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 01 TITLE -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Title" style="justify-content:center;padding:80px 120px;position:relative;overflow:hidden;">
+  <!-- grid bg -->
+  <svg style="position:absolute;inset:0;width:100%;height:100%;opacity:0.035;" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <pattern id="g" width="64" height="64" patternUnits="userSpaceOnUse">
+        <path d="M64 0L0 0 0 64" fill="none" stroke="#4f9cf9" stroke-width="1"/>
+      </pattern>
+    </defs>
+    <rect width="100%" height="100%" fill="url(#g)"/>
+  </svg>
+  <div style="position:absolute;top:-220px;right:-80px;width:900px;height:900px;background:radial-gradient(circle,rgba(79,156,249,0.10) 0%,transparent 68%);pointer-events:none;"></div>
+  <div style="position:absolute;bottom:-220px;left:160px;width:700px;height:700px;background:radial-gradient(circle,rgba(45,212,192,0.07) 0%,transparent 68%);pointer-events:none;"></div>
+
+  <div style="position:relative;z-index:1;max-width:1300px;">
+    <div style="font-family:var(--mono);font-size:24px;color:var(--teal);letter-spacing:0.14em;text-transform:uppercase;margin-bottom:28px;">LLM Deep Dive</div>
+    <h1 style="font-size:100px;font-weight:700;line-height:1.0;letter-spacing:-0.03em;margin-bottom:36px;">How Large Language Models<br><span style="color:var(--blue);">Perform Inference</span></h1>
+    <p style="font-size:34px;color:var(--muted);max-width:900px;line-height:1.55;">A technical walkthrough of the transformer inference pipeline — from raw text in to generated tokens out.</p>
+    <div style="display:flex;gap:52px;margin-top:68px;align-items:center;">
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:52px;font-weight:700;color:var(--blue);line-height:1;">10</span>
+        <span style="font-size:24px;color:var(--muted);">Concepts</span>
+      </div>
+      <div style="width:1px;height:56px;background:var(--border);"></div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:52px;font-weight:700;color:var(--teal);line-height:1;">1B+</span>
+        <span style="font-size:24px;color:var(--muted);">ops per token</span>
+      </div>
+      <div style="width:1px;height:56px;background:var(--border);"></div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:52px;font-weight:700;color:var(--purple);line-height:1;">1 token</span>
+        <span style="font-size:24px;color:var(--muted);">per forward pass</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 02 DECODE-ONLY -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Decode-Only Transformers">
+  <div class="label">01 — Architecture</div>
+  <h2 class="slide-title">Decode-Only Transformers</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 560 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Input tokens -->
+        <text x="210" y="28" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="15">input context</text>
+        <rect x="20"  y="38" width="88" height="44" rx="8" fill="#1a1f2e" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="64"  y="65" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="17">"The"</text>
+        <rect x="118" y="38" width="88" height="44" rx="8" fill="#1a1f2e" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="162" y="65" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="17">"cat"</text>
+        <rect x="216" y="38" width="88" height="44" rx="8" fill="#1a1f2e" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="260" y="65" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="17">"sat"</text>
+        <rect x="314" y="38" width="88" height="44" rx="8" fill="#1a1f2e" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="358" y="65" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="17">"on"</text>
+
+        <!-- Dashed lines down -->
+        <line x1="64"  y1="82" x2="64"  y2="126" stroke="#4f9cf9" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.45"/>
+        <line x1="162" y1="82" x2="162" y2="126" stroke="#4f9cf9" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.45"/>
+        <line x1="260" y1="82" x2="260" y2="126" stroke="#4f9cf9" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.45"/>
+        <line x1="358" y1="82" x2="358" y2="126" stroke="#4f9cf9" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.45"/>
+
+        <!-- Transformer block -->
+        <rect x="20" y="126" width="382" height="86" rx="12" fill="#1e2535" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="211" y="161" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="22" font-weight="600">Transformer</text>
+        <text x="211" y="185" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="15">N × (Self-Attention + Feed-Forward)</text>
+
+        <!-- Output arrow -->
+        <line x1="211" y1="212" x2="211" y2="248" stroke="#2dd4c0" stroke-width="2"/>
+        <polygon points="211,256 206,246 216,246" fill="#2dd4c0"/>
+
+        <!-- Output token -->
+        <rect x="151" y="256" width="120" height="46" rx="8" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="211" y="284" text-anchor="middle" fill="#2dd4c0" font-family="JetBrains Mono" font-size="20">"the"</text>
+
+        <!-- Loop back -->
+        <path d="M 271 279 Q 510 279 510 169 Q 510 90 408 58" stroke="#2dd4c0" stroke-width="1.5" fill="none" stroke-dasharray="7,4"/>
+        <polygon points="400,56 410,52 408,64" fill="#2dd4c0"/>
+        <text x="502" y="188" fill="#2dd4c0" font-family="Space Grotesk" font-size="14" text-anchor="middle" opacity="0.85">autoregressive</text>
+        <text x="502" y="206" fill="#2dd4c0" font-family="Space Grotesk" font-size="14" text-anchor="middle" opacity="0.85">loop</text>
+
+        <!-- Causal mask badge -->
+        <rect x="420" y="38" width="130" height="36" rx="7" fill="#1a1525" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="485" y="61" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="14">causal mask</text>
+        <text x="485" y="92" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">no peeking ahead</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">One job: <em>predict the next token</em> given all previous tokens</div>
+      <div class="bullet t">Each output token is appended and becomes <em class="t">the next input</em></div>
+      <div class="bullet p">A deep stack of transformer blocks, each refining <em class="p">what token comes next</em></div>
+      <div class="bullet a">Causal masking: tokens can only attend to <em class="a">what came before</em></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 03 TOKENIZATION -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Tokenization">
+  <div class="label">02 — Input</div>
+  <h2 class="slide-title">Tokenization</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 370" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Raw text -->
+        <rect x="60" y="16" width="420" height="52" rx="10" fill="#1a1f2e" stroke="#717899" stroke-width="1.5"/>
+        <text x="270" y="48" text-anchor="middle" fill="#e8eaf2" font-family="JetBrains Mono" font-size="24">"unbelievable"</text>
+        <text x="270" y="85" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">raw text input</text>
+
+        <!-- Arrow + label -->
+        <line x1="270" y1="68" x2="270" y2="110" stroke="#717899" stroke-width="1.5"/>
+        <polygon points="270,118 265,108 275,108" fill="#717899"/>
+        <text x="294" y="98" fill="#717899" font-family="Space Grotesk" font-size="13">BPE tokenization</text>
+
+        <!-- Token chunks -->
+        <rect x="58"  y="122" width="122" height="54" rx="10" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="119" y="155" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="23">"un"</text>
+        <rect x="196" y="122" width="148" height="54" rx="10" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="270" y="155" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="23">"believ"</text>
+        <rect x="360" y="122" width="122" height="54" rx="10" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="421" y="155" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="23">"able"</text>
+
+        <!-- Downward arrows -->
+        <line x1="119" y1="176" x2="119" y2="210" stroke="#4f9cf9" stroke-width="1.5" opacity="0.5"/>
+        <line x1="270" y1="176" x2="270" y2="210" stroke="#4f9cf9" stroke-width="1.5" opacity="0.5"/>
+        <line x1="421" y1="176" x2="421" y2="210" stroke="#4f9cf9" stroke-width="1.5" opacity="0.5"/>
+
+        <!-- Token IDs -->
+        <rect x="72"  y="210" width="94" height="42" rx="8" fill="#0c0f14" stroke="#717899" stroke-width="1.5"/>
+        <text x="119" y="236" text-anchor="middle" fill="#717899" font-family="JetBrains Mono" font-size="18">7,113</text>
+        <rect x="214" y="210" width="112" height="42" rx="8" fill="#0c0f14" stroke="#717899" stroke-width="1.5"/>
+        <text x="270" y="236" text-anchor="middle" fill="#717899" font-family="JetBrains Mono" font-size="18">8,728</text>
+        <rect x="371" y="210" width="100" height="42" rx="8" fill="#0c0f14" stroke="#717899" stroke-width="1.5"/>
+        <text x="421" y="236" text-anchor="middle" fill="#717899" font-family="JetBrains Mono" font-size="18">540</text>
+        <text x="270" y="268" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">integer token IDs</text>
+
+        <!-- Footer stat -->
+        <rect x="58" y="286" width="424" height="68" rx="10" fill="#111520"/>
+        <text x="270" y="316" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="16">Vocabulary size</text>
+        <text x="270" y="344" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="20" font-weight="700">32K – 100K tokens</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">Text split into <em>subword chunks</em> — words, pieces, or punctuation</div>
+      <div class="bullet t">Each chunk maps to an <em class="t">integer ID</em> in a fixed vocabulary</div>
+      <div class="bullet p">Rare words split into pieces; common words stay whole — <em class="p">"the" = 1 token</em></div>
+      <div class="bullet a">Pre-built BPE dictionary — <em class="a">not learned</em> during model training</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 04 EMBEDDING -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Embeddings & Positional Encoding">
+  <div class="label">03 — Representation</div>
+  <h2 class="slide-title">Embeddings & Positional Encoding</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Token ID -->
+        <rect x="190" y="14" width="160" height="50" rx="10" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="270" y="45" text-anchor="middle" fill="#4f9cf9" font-family="JetBrains Mono" font-size="22">token: 7113</text>
+
+        <line x1="270" y1="64" x2="270" y2="94" stroke="#4f9cf9" stroke-width="1.5"/>
+        <polygon points="270,102 265,92 275,92" fill="#4f9cf9"/>
+
+        <!-- Embedding table -->
+        <rect x="100" y="102" width="340" height="52" rx="10" fill="#1e2535" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="270" y="134" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="18" font-weight="600">Embedding Table  (vocab × d_model)</text>
+
+        <line x1="270" y1="154" x2="270" y2="184" stroke="#4f9cf9" stroke-width="1.5"/>
+        <polygon points="270,192 265,182 275,182" fill="#4f9cf9"/>
+
+        <!-- Dense vector -->
+        <rect x="48" y="192" width="444" height="54" rx="10" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="270" y="214" text-anchor="middle" fill="#2dd4c0" font-family="JetBrains Mono" font-size="13">[0.23, -0.81, 1.34, 0.07, -0.42, 0.61, ...</text>
+        <text x="270" y="234" text-anchor="middle" fill="#717899" font-family="JetBrains Mono" font-size="13">... 0.19, -1.02, 0.55]   ← 4096 dims</text>
+
+        <!-- Plus sign -->
+        <text x="270" y="274" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="26">+</text>
+
+        <!-- Positional encoding -->
+        <rect x="118" y="284" width="304" height="50" rx="10" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+        <text x="270" y="315" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="18">Positional Encoding (position 4)</text>
+
+        <line x1="270" y1="334" x2="270" y2="352" stroke="#2dd4c0" stroke-width="1.5"/>
+        <polygon points="270,360 265,350 275,350" fill="#2dd4c0"/>
+        <text x="270" y="372" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="16" font-weight="600">token representation: what + where</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">Token ID → lookup in table → <em>dense vector of ~4096 numbers</em></div>
+      <div class="bullet t">Similar tokens cluster nearby: <em class="t">"king" ≈ "queen"</em>,  "cat" ≈ "dog"</div>
+      <div class="bullet p">Positional encodings add <em class="p">token order</em> — order changes meaning</div>
+      <div class="bullet a">Result encodes both <em class="a">what the token is</em> and where it sits</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 05 SELF-ATTENTION -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Self-Attention">
+  <div class="label">04 — Core Mechanism</div>
+  <h2 class="slide-title">Self-Attention</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 390" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Token input -->
+        <rect x="190" y="10" width="160" height="46" rx="8" fill="#1a1f2e" stroke="#717899" stroke-width="1.5"/>
+        <text x="270" y="38" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="17">token vector</text>
+
+        <!-- Three projections -->
+        <line x1="235" y1="56" x2="110" y2="100" stroke="#4f9cf9" stroke-width="1.5"/>
+        <line x1="270" y1="56" x2="270" y2="100" stroke="#2dd4c0" stroke-width="1.5"/>
+        <line x1="305" y1="56" x2="430" y2="100" stroke="#a78bfa" stroke-width="1.5"/>
+
+        <!-- Q -->
+        <rect x="50"  y="100" width="120" height="52" rx="8" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="110" y="122" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="15" font-weight="600">Query (Q)</text>
+        <text x="110" y="142" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">"what I seek"</text>
+        <!-- K -->
+        <rect x="210" y="100" width="120" height="52" rx="8" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="270" y="122" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="15" font-weight="600">Key (K)</text>
+        <text x="270" y="142" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">"what I contain"</text>
+        <!-- V -->
+        <rect x="370" y="100" width="120" height="52" rx="8" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+        <text x="430" y="122" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="15" font-weight="600">Value (V)</text>
+        <text x="430" y="142" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">"what I share"</text>
+
+        <!-- Q·K -->
+        <line x1="110" y1="152" x2="196" y2="196" stroke="#4f9cf9" stroke-width="1.5"/>
+        <line x1="270" y1="152" x2="224" y2="196" stroke="#2dd4c0" stroke-width="1.5"/>
+        <rect x="134" y="196" width="180" height="46" rx="8" fill="#1e2535" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="224" y="217" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="14" font-weight="600">Attention Scores</text>
+        <text x="224" y="233" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">Q · Kᵀ / √d_k</text>
+
+        <!-- Softmax -->
+        <line x1="224" y1="242" x2="224" y2="270" stroke="#717899" stroke-width="1.5"/>
+        <rect x="144" y="270" width="160" height="40" rx="8" fill="#1a1f2e" stroke="#717899" stroke-width="1.5"/>
+        <text x="224" y="295" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="14">softmax → weights</text>
+
+        <!-- weighted V -->
+        <line x1="224" y1="310" x2="296" y2="340" stroke="#717899" stroke-width="1.5"/>
+        <line x1="430" y1="152" x2="344" y2="340" stroke="#a78bfa" stroke-width="1.5"/>
+        <rect x="200" y="340" width="192" height="44" rx="8" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+        <text x="296" y="367" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="15" font-weight="600">Output vector</text>
+
+        <!-- multi-head badge -->
+        <rect x="396" y="268" width="136" height="36" rx="7" fill="#111520" stroke="#4f9cf9" stroke-width="1"/>
+        <text x="464" y="291" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="13">× H heads parallel</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">Each token asks: <em>which previous tokens matter most?</em></div>
+      <div class="bullet t"><em class="t">Q · Kᵀ</em> computes relevance scores; softmax converts to attention weights</div>
+      <div class="bullet p"><em class="p">Multi-head</em> attention runs H copies in parallel — grammar, semantics, context</div>
+      <div class="bullet a">Causal masking: only attend to <em class="a">prior tokens</em>, never ahead</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 06 FEED-FORWARD -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Feed-Forward Layers">
+  <div class="label">05 — Knowledge Store</div>
+  <h2 class="slide-title">Feed-Forward Layers</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 370" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Input -->
+        <rect x="170" y="12" width="200" height="50" rx="10" fill="#1a1f2e" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="270" y="35" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="15" font-weight="600">Attention output</text>
+        <text x="270" y="52" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">d_model = 4096</text>
+
+        <line x1="270" y1="62" x2="270" y2="90" stroke="#717899" stroke-width="1.5"/>
+        <polygon points="270,98 265,88 275,88" fill="#717899"/>
+
+        <!-- W1 -->
+        <rect x="50" y="98" width="440" height="56" rx="10" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="270" y="120" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="16" font-weight="600">W₁  ·  Linear Expansion</text>
+        <text x="270" y="142" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">4096  →  16,384 dims</text>
+
+        <line x1="270" y1="154" x2="270" y2="182" stroke="#717899" stroke-width="1.5"/>
+        <polygon points="270,190 265,180 275,180" fill="#717899"/>
+
+        <!-- Activation -->
+        <rect x="120" y="190" width="300" height="52" rx="10" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+        <text x="270" y="212" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="16" font-weight="600">Activation  (SiLU / GELU)</text>
+        <text x="270" y="232" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">non-linearity — "which features fire"</text>
+
+        <line x1="270" y1="242" x2="270" y2="270" stroke="#717899" stroke-width="1.5"/>
+        <polygon points="270,278 265,268 275,268" fill="#717899"/>
+
+        <!-- W2 -->
+        <rect x="50" y="278" width="440" height="56" rx="10" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="270" y="300" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="16" font-weight="600">W₂  ·  Linear Projection</text>
+        <text x="270" y="320" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">16,384  →  4096 dims  (back to d_model)</text>
+
+        <text x="270" y="358" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">~134M params per FFN  ·  processes each token independently</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">Two matrix multiplies with activation — <em>most parameters live here</em></div>
+      <div class="bullet t">Attention finds relevant context; FFN <em class="t">applies stored knowledge</em></div>
+      <div class="bullet p">Acts like a vast <em class="p">compressed database</em> of learned facts and patterns</div>
+      <div class="bullet a">One attention + one FFN = one block; stacked <em class="a">32–80× deep</em></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 07 LAYER STACKING -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Layer Stacking">
+  <div class="label">06 — Depth</div>
+  <h2 class="slide-title">Layer Stacking</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Embeddings in -->
+        <rect x="160" y="8" width="220" height="42" rx="8" fill="#1a1f2e" stroke="#717899" stroke-width="1.5"/>
+        <text x="270" y="34" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="15">token embeddings</text>
+        <line x1="270" y1="50" x2="270" y2="68" stroke="#717899" stroke-width="1.5"/>
+
+        <!-- Early -->
+        <rect x="50" y="68" width="440" height="56" rx="10" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="270" y="89" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="15" font-weight="700">Layers 1 – 10  ·  Early</text>
+        <text x="270" y="110" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">syntax  ·  grammar  ·  basic word relationships</text>
+        <line x1="270" y1="124" x2="270" y2="142" stroke="#717899" stroke-width="1.5"/>
+
+        <!-- Residual arrow -->
+        <path d="M 490 68 Q 530 68 530 192 Q 530 316 490 316" stroke="#4f9cf9" stroke-width="1" fill="none" stroke-dasharray="5,3" opacity="0.35"/>
+        <text x="534" y="200" fill="#4f9cf9" font-family="Space Grotesk" font-size="13" opacity="0.5">residual</text>
+
+        <!-- Middle -->
+        <rect x="50" y="142" width="440" height="56" rx="10" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="270" y="163" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="15" font-weight="700">Layers 11 – 50  ·  Middle</text>
+        <text x="270" y="184" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">entities  ·  semantic roles  ·  factual associations</text>
+        <line x1="270" y1="198" x2="270" y2="216" stroke="#717899" stroke-width="1.5"/>
+
+        <!-- Late -->
+        <rect x="50" y="216" width="440" height="56" rx="10" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+        <text x="270" y="237" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="15" font-weight="700">Layers 51 – 80  ·  Late</text>
+        <text x="270" y="258" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">reasoning  ·  task-specific  ·  next-token decision</text>
+        <line x1="270" y1="272" x2="270" y2="290" stroke="#717899" stroke-width="1.5"/>
+
+        <!-- LayerNorm -->
+        <rect x="50" y="290" width="440" height="40" rx="8" fill="#111520" stroke="#717899" stroke-width="1"/>
+        <text x="270" y="315" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">Layer Norm after each sub-layer — keeps signals numerically stable</text>
+
+        <!-- Output -->
+        <line x1="270" y1="330" x2="270" y2="348" stroke="#a78bfa" stroke-width="1.5"/>
+        <rect x="160" y="348" width="220" height="40" rx="8" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+        <text x="270" y="373" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="14" font-weight="600">final token representation</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet"><em>Early layers</em>: syntax, grammar, surface-level features</div>
+      <div class="bullet t"><em class="t">Middle layers</em>: entities, semantic roles, factual associations</div>
+      <div class="bullet p"><em class="p">Late layers</em>: task-specific reasoning, next-token prediction</div>
+      <div class="bullet a">Residual connections pass early information forward — <em class="a">nothing lost</em></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 08 OUTPUT -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="From Vectors to Words">
+  <div class="label">07 — Output</div>
+  <h2 class="slide-title">From Vectors to Words</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 390" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Final hidden state -->
+        <rect x="140" y="10" width="260" height="50" rx="9" fill="#1a1f2e" stroke="#4f9cf9" stroke-width="1.5"/>
+        <text x="270" y="32" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="14" font-weight="600">Final hidden state (last token)</text>
+        <text x="270" y="50" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">d_model vector  ·  4096 dims</text>
+
+        <line x1="270" y1="60" x2="270" y2="80" stroke="#717899" stroke-width="1.5"/>
+        <text x="270" y="96" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13">× Embedding table (transposed)  →  logits</text>
+        <line x1="270" y1="104" x2="270" y2="118" stroke="#717899" stroke-width="1.5"/>
+        <polygon points="270,126 265,116 275,116" fill="#717899"/>
+
+        <!-- Logit bars -->
+        <text x="48" y="148" fill="#717899" font-family="Space Grotesk" font-size="12">raw logits</text>
+        <rect x="48" y="152" width="196" height="20" rx="3" fill="#2dd4c0"/>
+        <text x="252" y="167" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14"> "the"  12.4</text>
+        <rect x="48" y="178" width="148" height="20" rx="3" fill="#4f9cf9" opacity="0.75"/>
+        <text x="204" y="193" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14"> "a"    9.1</text>
+        <rect x="48" y="204" width="90"  height="20" rx="3" fill="#a78bfa" opacity="0.65"/>
+        <text x="146" y="219" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14"> "her"  5.8</text>
+        <rect x="48" y="230" width="58"  height="20" rx="3" fill="#717899" opacity="0.55"/>
+        <text x="114" y="245" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14"> "my"  3.9</text>
+
+        <!-- Softmax box -->
+        <rect x="318" y="148" width="200" height="108" rx="9" fill="#111520" stroke="#2dd4c0" stroke-width="1.5"/>
+        <text x="418" y="172" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="14" font-weight="600">softmax  →  P</text>
+        <text x="418" y="196" text-anchor="middle" fill="#e8eaf2" font-family="JetBrains Mono" font-size="13">"the"  →  12%</text>
+        <text x="418" y="216" text-anchor="middle" fill="#e8eaf2" font-family="JetBrains Mono" font-size="13">"a"    →   8%</text>
+        <text x="418" y="236" text-anchor="middle" fill="#717899" font-family="JetBrains Mono" font-size="13">...</text>
+
+        <!-- Sampling -->
+        <line x1="270" y1="256" x2="270" y2="278" stroke="#717899" stroke-width="1.5"/>
+        <polygon points="270,286 265,276 275,276" fill="#717899"/>
+        <rect x="36" y="286" width="468" height="58" rx="10" fill="#111520"/>
+        <text x="270" y="307" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="13" font-weight="600">Sampling Strategy</text>
+        <text x="130" y="332" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="14">greedy</text>
+        <text x="270" y="332" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="14">temperature</text>
+        <text x="410" y="332" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="14">top-k / top-p</text>
+
+        <text x="270" y="370" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="15" font-weight="600">→ append token → repeat</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">Only the <em>last token's vector</em> matters — it predicts what comes next</div>
+      <div class="bullet t"><em class="t">Logits</em> are raw scores for every vocabulary token</div>
+      <div class="bullet p">Softmax converts logits to probabilities; <em class="p">sampling picks the next token</em></div>
+      <div class="bullet a">Token appended → sequence grows → <em class="a">loop repeats</em> until done</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 09 KV CACHE -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="The KV Cache">
+  <div class="label">08 — Optimization</div>
+  <h2 class="slide-title">The KV Cache</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Without cache -->
+        <text x="126" y="26" text-anchor="middle" fill="#f87171" font-family="Space Grotesk" font-size="15" font-weight="700">Without Cache</text>
+        <rect x="22"  y="36" width="54" height="36" rx="6" fill="#1a1f2e" stroke="#717899" stroke-width="1.5"/><text x="49" y="59" text-anchor="middle" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14">T1</text>
+        <rect x="84"  y="36" width="54" height="36" rx="6" fill="#1a1f2e" stroke="#717899" stroke-width="1.5"/><text x="111" y="59" text-anchor="middle" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14">T2</text>
+        <rect x="146" y="36" width="54" height="36" rx="6" fill="#1a1f2e" stroke="#f87171" stroke-width="2"/><text x="173" y="59" text-anchor="middle" fill="#f87171" font-family="JetBrains Mono" font-size="14">T3</text>
+        <path d="M 22 72 Q 22 96 80 96 Q 138 96 168 72" fill="none" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4,2"/>
+        <text x="90" y="112" text-anchor="middle" fill="#f87171" font-family="Space Grotesk" font-size="12">recomputed every step</text>
+
+        <!-- Divider -->
+        <line x1="260" y1="14" x2="260" y2="200" stroke="#717899" stroke-width="1" stroke-dasharray="5,4" opacity="0.35"/>
+
+        <!-- With cache -->
+        <text x="400" y="26" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="15" font-weight="700">With KV Cache</text>
+        <rect x="278" y="36" width="54" height="36" rx="6" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/><text x="305" y="59" text-anchor="middle" fill="#2dd4c0" font-family="JetBrains Mono" font-size="14">T1</text>
+        <rect x="340" y="36" width="54" height="36" rx="6" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/><text x="367" y="59" text-anchor="middle" fill="#2dd4c0" font-family="JetBrains Mono" font-size="14">T2</text>
+        <rect x="402" y="36" width="54" height="36" rx="6" fill="#1a1f2e" stroke="#e8eaf2" stroke-width="2"/><text x="429" y="59" text-anchor="middle" fill="#e8eaf2" font-family="JetBrains Mono" font-size="14">T3</text>
+        <rect x="278" y="82" width="112" height="32" rx="6" fill="#0a1510" stroke="#2dd4c0" stroke-width="1.5"/>
+        <text x="334" y="102" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="12">K, V cached ✓</text>
+        <text x="429" y="100" fill="#e8eaf2" font-family="Space Grotesk" font-size="11" text-anchor="middle">new only</text>
+
+        <!-- Tradeoff -->
+        <rect x="18" y="136" width="504" height="104" rx="12" fill="#111520" stroke="#717899" stroke-width="1"/>
+        <text x="270" y="160" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="16" font-weight="600">Time–Space Tradeoff</text>
+        <rect x="34" y="170" width="220" height="54" rx="8" fill="#1a162e" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="144" y="193" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="14" font-weight="600">More GPU memory</text>
+        <text x="144" y="212" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">grows linearly with seq length</text>
+        <text x="270" y="202" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="20">⟷</text>
+        <rect x="286" y="170" width="220" height="54" rx="8" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="1.5"/>
+        <text x="396" y="193" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="14" font-weight="600">Far less compute</text>
+        <text x="396" y="212" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">only new token processed</text>
+
+        <!-- Key insight -->
+        <rect x="18" y="254" width="504" height="44" rx="8" fill="#0c0f14" stroke="#f5a623" stroke-width="1.5"/>
+        <text x="270" y="281" text-anchor="middle" fill="#f5a623" font-family="Space Grotesk" font-size="15">LLM inference is <tspan font-weight="700">memory-bound</tspan>, not compute-bound</text>
+
+        <text x="270" y="330" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">128K token context  →  <tspan fill="#a78bfa" font-weight="600">gigabytes</tspan> of KV cache per layer</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet">Without cache: <em>reprocess entire sequence</em> per token — O(n²) cost</div>
+      <div class="bullet t">KV cache stores K and V; only <em class="t">the new token</em> is computed fresh</div>
+      <div class="bullet p">Inference becomes <em class="p">memory-bound</em>, not compute-bound</div>
+      <div class="bullet a">Long contexts are hard: cache grows <em class="a">linearly with sequence length</em></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 10 PREFILL VS DECODE -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Prefill vs. Decode">
+  <div class="label">09 — Inference Phases</div>
+  <h2 class="slide-title">Prefill vs. Decode</h2>
+  <div class="split">
+    <div class="diagram-pane">
+      <svg viewBox="0 0 540 380" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;">
+        <!-- Phase labels -->
+        <text x="122" y="40" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="17" font-weight="700">PREFILL</text>
+        <text x="358" y="40" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="17" font-weight="700">DECODE</text>
+
+        <!-- Timeline bar -->
+        <rect x="36" y="50" width="468" height="14" rx="7" fill="#1a1f2e"/>
+        <rect x="36" y="50" width="176" height="14" rx="7 0 0 7" fill="#4f9cf9"/>
+        <rect x="212" y="50" width="292" height="14" rx="0 7 7 0" fill="#2dd4c0"/>
+
+        <!-- TTFT marker -->
+        <line x1="212" y1="44" x2="212" y2="82" stroke="#f5a623" stroke-width="2"/>
+        <text x="212" y="98" text-anchor="middle" fill="#f5a623" font-family="Space Grotesk" font-size="13" font-weight="600">TTFT</text>
+        <text x="212" y="114" text-anchor="middle" fill="#f5a623" font-family="Space Grotesk" font-size="11">first token</text>
+
+        <!-- Prefill box -->
+        <rect x="36" y="128" width="208" height="144" rx="12" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+        <text x="140" y="154" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="15" font-weight="700">Prefill Phase</text>
+        <text x="140" y="176" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="13">Process entire prompt</text>
+        <text x="140" y="194" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="13">in one parallel batch</text>
+        <text x="140" y="218" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">Compute-heavy</text>
+        <text x="140" y="236" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">Fills KV cache</text>
+        <text x="140" y="258" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="12" font-weight="600">GPU util: high</text>
+
+        <!-- Decode box -->
+        <rect x="296" y="128" width="208" height="144" rx="12" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2"/>
+        <text x="400" y="154" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="15" font-weight="700">Decode Phase</text>
+        <text x="400" y="176" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="13">Generate one token</text>
+        <text x="400" y="194" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="13">at a time (sequential)</text>
+        <text x="400" y="218" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">Memory-bound</text>
+        <text x="400" y="236" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">KV cache lookups</text>
+        <text x="400" y="258" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="12" font-weight="600">GPU util: low</text>
+
+        <!-- Metrics row -->
+        <rect x="36" y="290" width="468" height="66" rx="10" fill="#111520"/>
+        <text x="160" y="314" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12" font-weight="600">Prefill metric</text>
+        <text x="160" y="342" text-anchor="middle" fill="#f5a623" font-family="Space Grotesk" font-size="22" font-weight="700">TTFT</text>
+        <line x1="270" y1="292" x2="270" y2="354" stroke="#717899" stroke-width="1" opacity="0.3"/>
+        <text x="380" y="314" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12" font-weight="600">Decode metric</text>
+        <text x="380" y="342" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="22" font-weight="700">tokens / sec</text>
+      </svg>
+    </div>
+    <div class="bullets-pane">
+      <div class="bullet"><em>Prefill</em>: entire prompt processed in one parallel batch</div>
+      <div class="bullet t"><em class="t">Decode</em>: tokens generated one-at-a-time in a sequential loop</div>
+      <div class="bullet p"><em class="p">TTFT</em> is prefill speed; <em class="p">tokens/sec</em> is decode throughput</div>
+      <div class="bullet a">Different hardware and batching strategies <em class="a">target each phase separately</em></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 11 FULL PIPELINE -->
+<!-- ══════════════════════════════════════════════════ -->
+<section data-label="Putting It All Together" style="padding:64px 80px 48px;">
+  <div class="label">10 — Full Pipeline</div>
+  <h2 style="font-size:64px;font-weight:700;letter-spacing:-0.025em;margin-bottom:32px;">Putting It All Together</h2>
+
+  <svg viewBox="0 0 1760 660" xmlns="http://www.w3.org/2000/svg" style="width:100%;flex:1;">
+
+    <!-- ══ ROW 1: Tokenize → Embed → N×Transformer Blocks ══ -->
+
+    <!-- 1. Tokenize -->
+    <rect x="20" y="50" width="280" height="190" rx="14" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+    <text x="160" y="106" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="22" font-weight="700">Tokenize</text>
+    <text x="160" y="136" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="16">text → integer IDs</text>
+    <text x="160" y="162" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">BPE lookup</text>
+    <text x="160" y="186" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">vocab: 32K–100K</text>
+
+    <line x1="300" y1="145" x2="347" y2="145" stroke="#717899" stroke-width="2.5"/>
+    <polygon points="355,145 345,140 345,150" fill="#717899"/>
+
+    <!-- 2. Embed -->
+    <rect x="355" y="50" width="280" height="190" rx="14" fill="#0f1d30" stroke="#4f9cf9" stroke-width="2"/>
+    <text x="495" y="106" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="22" font-weight="700">Embed</text>
+    <text x="495" y="136" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="16">IDs → vectors</text>
+    <text x="495" y="162" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">+ positional encoding</text>
+    <text x="495" y="186" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">4096 dims</text>
+
+    <line x1="635" y1="145" x2="682" y2="145" stroke="#717899" stroke-width="2.5"/>
+    <polygon points="690,145 680,140 680,150" fill="#717899"/>
+
+    <!-- 3. N × Transformer Blocks -->
+    <rect x="690" y="28" width="930" height="212" rx="14" fill="#1e2535" stroke="#2dd4c0" stroke-width="2.5"/>
+    <text x="1155" y="66" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="20" font-weight="700">× N Transformer Blocks</text>
+    <rect x="710" y="80" width="430" height="100" rx="10" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="1.5"/>
+    <text x="925" y="118" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="18" font-weight="600">Self-Attention</text>
+    <text x="925" y="144" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">multi-head · causal mask</text>
+    <rect x="1170" y="80" width="430" height="100" rx="10" fill="#0f1d30" stroke="#4f9cf9" stroke-width="1.5"/>
+    <text x="1385" y="118" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="18" font-weight="600">Feed-Forward</text>
+    <text x="1385" y="144" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">W₁ · activation · W₂</text>
+    <rect x="710" y="192" width="890" height="34" rx="7" fill="#111520"/>
+    <text x="1155" y="214" text-anchor="middle" fill="#f5a623" font-family="Space Grotesk" font-size="14">KV cache: K,V from all previous tokens stored — only the new token computed fresh each pass</text>
+
+    <!-- ══ DOWN CONNECTOR ══ -->
+    <line x1="1460" y1="240" x2="1460" y2="418" stroke="#717899" stroke-width="2.5" stroke-dasharray="8,5"/>
+    <polygon points="1460,426 1455,416 1465,416" fill="#717899"/>
+
+    <!-- ══ ROW 2: Project ← Sample ← Token out ══ -->
+
+    <!-- 4. Project -->
+    <rect x="1320" y="426" width="280" height="190" rx="14" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+    <text x="1460" y="482" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="22" font-weight="700">Project</text>
+    <text x="1460" y="512" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="16">→ vocab logits</text>
+    <text x="1460" y="538" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">softmax → probabilities</text>
+    <text x="1460" y="562" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">one score per token</text>
+
+    <!-- ← arrow -->
+    <line x1="1320" y1="521" x2="1273" y2="521" stroke="#a78bfa" stroke-width="2.5"/>
+    <polygon points="1265,521 1275,516 1275,526" fill="#a78bfa"/>
+
+    <!-- 5. Sample -->
+    <rect x="975" y="426" width="280" height="190" rx="14" fill="#1a162e" stroke="#a78bfa" stroke-width="2"/>
+    <text x="1115" y="482" text-anchor="middle" fill="#a78bfa" font-family="Space Grotesk" font-size="22" font-weight="700">Sample</text>
+    <text x="1115" y="512" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="16">pick next token</text>
+    <text x="1115" y="538" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">top-k / top-p</text>
+    <text x="1115" y="562" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">temperature scaling</text>
+
+    <!-- ← arrow -->
+    <line x1="975" y1="521" x2="928" y2="521" stroke="#2dd4c0" stroke-width="2.5"/>
+    <polygon points="920,521 930,516 930,526" fill="#2dd4c0"/>
+
+    <!-- 6. Token out -->
+    <rect x="630" y="426" width="280" height="190" rx="14" fill="#0d1e1a" stroke="#2dd4c0" stroke-width="2.5"/>
+    <text x="770" y="482" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="22" font-weight="700">Token out</text>
+    <text x="770" y="512" text-anchor="middle" fill="#e8eaf2" font-family="Space Grotesk" font-size="16">append to sequence</text>
+    <text x="770" y="538" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="14">1 token per pass</text>
+    <text x="770" y="562" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="14" font-weight="600">repeat until EOS</text>
+
+    <!-- ══ LOOP BACK ══ -->
+    <path d="M 770 616 L 770 642 Q 390 642 390 520 Q 390 145 355 145" stroke="#2dd4c0" stroke-width="2" fill="none" stroke-dasharray="10,5"/>
+    <polygon points="355,145 365,140 365,150" fill="#2dd4c0"/>
+    <text x="548" y="656" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="15" font-weight="600">autoregressive loop — repeat until EOS</text>
+
+    <!-- ══ STATS ══ -->
+    <rect x="1630" y="426" width="130" height="190" rx="12" fill="#111520"/>
+    <text x="1695" y="464" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="12">per response</text>
+    <text x="1695" y="502" text-anchor="middle" fill="#4f9cf9" font-family="Space Grotesk" font-size="36" font-weight="700">200×</text>
+    <text x="1695" y="522" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="11">forward passes</text>
+    <line x1="1640" y1="536" x2="1750" y2="536" stroke="#717899" stroke-width="1" opacity="0.25"/>
+    <text x="1695" y="562" text-anchor="middle" fill="#2dd4c0" font-family="Space Grotesk" font-size="28" font-weight="700">1B+</text>
+    <text x="1695" y="584" text-anchor="middle" fill="#717899" font-family="Space Grotesk" font-size="11">ops per token</text>
+  </svg>
+</section>
+
+</deck-stage>
+</body>
+</html>
