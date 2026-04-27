@@ -14,7 +14,7 @@
   - Claude Sonnet 4.6
   - and other OpenAI and Anthropic models
   
-# Misc
+## Misc
 - markitdown : https://github.com/microsoft/markitdown
   - mcp
   - con
@@ -23,7 +23,7 @@
 - Claude Design
 - Claude Context
 
-# Harness
+## Harness
   - Agents (besides copilot)
     - Claude Code
       - Anthropic models only
@@ -45,7 +45,7 @@
   - RAG - retrieval augmented generation
     - vector database
  
- # Providers
+ ## Providers
    - Dedicated Cloud Providers
      - subscription or API pay-as-you-go
      - Anthropic
@@ -65,7 +65,7 @@
      - free, run locally
      - Hugging Face
 
-# Subscription vs. API
+## Subscription vs. API
   - subscription
     - fixed price
     - multiple price tiers, $20, $100, $200 
@@ -79,7 +79,7 @@
     - Auth Token and Endpoing
     - can be used a tool, but more fit for supporting AI in an app
 
-# LLM Software Dev Kits (SDK)
+## LLM Software Dev Kits (SDK)
 - Openai
   - ad-hoc standard, many providers have compatible API and REST 
   - REST API
@@ -94,4 +94,15 @@
   - Python
   - JavaScript
   - OpenAI REST compatible
+- Langchain and LangGraph
+  - Provider agnostic
+  - Supports most providers, models and REST interface
+  
 
+## Incorporating AI In Your Product
+- select provider
+- select REST
+  - use REST if you used C or C++
+- select SDK  
+  - use OpenAI  if you want to support multiple LLM providers
+  - 
